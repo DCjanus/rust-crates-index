@@ -79,7 +79,7 @@ git-performance = ["git", "gix?/max-performance"]
 ## Add support for https based URLs in git indices.
 ##
 ## Most will want this enabled unless they know to only have to access non-https URLs for their indices.
-git-https = ["git", "gix?/blocking-http-transport-curl"]
+git-https = ["git", "gix?/blocking-http-transport-curl-openssl"]
 ## Like `git-https` but using a reqwest backend instead of curl
 git-https-reqwest = ["git", "gix?/blocking-http-transport-reqwest"]
 ## Allow some functions to receive `rayon`-powered siblings for higher performance.
