@@ -578,7 +578,7 @@ impl Iterator for CratesTreesToBlobs {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(obj) = self.stack.pop() {
             if obj.kind.is_tree() {
-                let tree = gix::objs::TreeRef::from_bytes(&obj.data).unwrap();
+                let tree = gix::objs::TreeRef::from_bytes(&obj.data, gix::hash::Kind::Sha1).unwrap();
                 for entry in tree.entries.into_iter().rev() {
                     self.stack.push(self.repo.find_object(entry.oid).unwrap().detach());
                 }
