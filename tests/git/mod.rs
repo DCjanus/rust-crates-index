@@ -1,7 +1,8 @@
 #[cfg(feature = "git-https")]
 pub(crate) mod with_https {
     use crates_index::git::URL;
-    use crates_index::GitIndex;
+    use crates_index::{GitIndex, GitIndexOptions};
+    use std::num::NonZeroU32;
     use std::time::SystemTime;
 
     #[test]
@@ -109,6 +110,24 @@ pub(crate) mod with_https {
         test_sval(&repo);
         repo.update().expect("Failed to fetch crates.io index");
         test_sval(&repo);
+    }
+
+    #[test]
+    fn with_path_and_options_clones_shallow_index() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let path = tmp_dir.path().join("shallow-index");
+        let source = std::fs::canonicalize("tests/fixtures/git-registry").unwrap();
+        let options = GitIndexOptions::new().with_shallow_depth(NonZeroU32::new(1).unwrap());
+
+        let mut repo = GitIndex::with_path_and_options(path.clone(), source.to_string_lossy(), options)
+            .expect("Failed to clone shallow index");
+
+        assert!(path.join("shallow").is_file(), "the cloned index should be shallow");
+        assert!(repo.crate_("sval").is_some());
+
+        repo.update().expect("Failed to update shallow index");
+        assert!(path.join("shallow").is_file(), "the updated index should stay shallow");
+        assert!(repo.crate_("sval").is_some());
     }
 
     #[test]

@@ -104,7 +104,38 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_code, rust_2018_compatibility, missing_docs)]
+#[cfg(feature = "git")]
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+
+/// Options for opening and updating a [`GitIndex`].
+#[cfg(feature = "git")]
+#[derive(Clone, Debug, Default)]
+pub struct GitIndexOptions {
+    shallow_depth: Option<NonZeroU32>,
+}
+
+#[cfg(feature = "git")]
+impl GitIndexOptions {
+    /// Create options with the default behavior.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the configured shallow clone depth.
+    #[must_use]
+    pub fn shallow_depth(&self) -> Option<NonZeroU32> {
+        self.shallow_depth
+    }
+
+    /// Configure fetches to keep only `depth` commits of history from the remote.
+    #[must_use]
+    pub fn with_shallow_depth(mut self, depth: NonZeroU32) -> Self {
+        self.shallow_depth = Some(depth);
+        self
+    }
+}
 
 /// Wrapper around managing the crates.io-index git repository
 ///
@@ -125,6 +156,7 @@ use std::path::{Path, PathBuf};
 pub struct GitIndex {
     path: std::path::PathBuf,
     url: String,
+    options: GitIndexOptions,
 
     pub(crate) repo: gix::Repository,
     pub(crate) head_commit: gix::ObjectId,

@@ -4,7 +4,7 @@ use crate::dirs::{
 };
 use crate::error::GixError;
 use crate::git::{changes, config, URL};
-use crate::{path_max_byte_len, Crate, Error, GitIndex, IndexConfig};
+use crate::{path_max_byte_len, Crate, Error, GitIndex, GitIndexOptions, IndexConfig};
 use gix::bstr::ByteSlice;
 use gix::config::tree::Key;
 use std::io;
@@ -54,7 +54,7 @@ impl GitIndex {
     #[doc(hidden)]
     #[deprecated(note = "use new_cargo_default()")]
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
-        Self::from_path_and_url(path.into(), URL.into(), Mode::ReadOnly)
+        Self::from_path_and_url(path.into(), URL.into(), Mode::ReadOnly, GitIndexOptions::default())
             .unwrap()
             .expect("repo present after possibly cloning index")
     }
@@ -100,10 +100,13 @@ impl GitIndex {
     /// Like [`Self::from_url`], but accepts an explicit [`HashKind`] for determining the crates index path.
     pub fn from_url_with_hash_kind(url: &str, hash_kind: &HashKind) -> Result<Self, Error> {
         let (path, canonical_url) = local_path_and_canonical_url_with_hash_kind(url, None, hash_kind)?;
-        Ok(
-            Self::from_path_and_url(path, canonical_url, Mode::CloneUrlToPathIfRepoMissing)?
-                .expect("repo present after possibly cloning it"),
-        )
+        Ok(Self::from_path_and_url(
+            path,
+            canonical_url,
+            Mode::CloneUrlToPathIfRepoMissing,
+            GitIndexOptions::default(),
+        )?
+        .expect("repo present after possibly cloning it"))
     }
 
     /// Like [`Self::from_url()`], but read-only without auto-cloning the index at `url`.
@@ -114,7 +117,7 @@ impl GitIndex {
     /// Like [`Self::try_from_url`], but accepts an explicit [`HashKind`] for determining the crates index path.
     pub fn try_from_url_with_hash_kind(url: &str, hash_kind: &HashKind) -> Result<Option<Self>, Error> {
         let (path, canonical_url) = local_path_and_canonical_url_with_hash_kind(url, None, hash_kind)?;
-        Self::from_path_and_url(path, canonical_url, Mode::ReadOnly)
+        Self::from_path_and_url(path, canonical_url, Mode::ReadOnly, GitIndexOptions::default())
     }
 
     /// Creates a bare index at the provided `path` with the specified repository `URL`.
@@ -126,8 +129,27 @@ impl GitIndex {
     /// Concurrent invocations may fail if the index needs to be cloned. To prevent that,
     /// use synchronization mechanisms like mutexes or file locks as needed by the application.
     pub fn with_path<P: Into<PathBuf>, S: Into<String>>(path: P, url: S) -> Result<Self, Error> {
+        Ok(Self::from_path_and_url(
+            path.into(),
+            url.into(),
+            Mode::CloneUrlToPathIfRepoMissing,
+            GitIndexOptions::default(),
+        )?
+        .expect("repo present after possibly cloning it"))
+    }
+
+    /// Creates a bare index at the provided `path` with the specified repository `URL` and options.
+    ///
+    /// *Note that this clones a new index to `path` if none is present there yet.
+    ///
+    /// The provided options are also used by future [`Self::update()`] calls.
+    pub fn with_path_and_options<P: Into<PathBuf>, S: Into<String>>(
+        path: P,
+        url: S,
+        options: GitIndexOptions,
+    ) -> Result<Self, Error> {
         Ok(
-            Self::from_path_and_url(path.into(), url.into(), Mode::CloneUrlToPathIfRepoMissing)?
+            Self::from_path_and_url(path.into(), url.into(), Mode::CloneUrlToPathIfRepoMissing, options)?
                 .expect("repo present after possibly cloning it"),
         )
     }
@@ -135,7 +157,7 @@ impl GitIndex {
     /// Like [`Self::with_path()`], but read-only without auto-cloning the index at `url` if it's not already
     /// present at `path`.
     pub fn try_with_path<P: Into<PathBuf>, S: Into<String>>(path: P, url: S) -> Result<Option<Self>, Error> {
-        Self::from_path_and_url(path.into(), url.into(), Mode::ReadOnly)
+        Self::from_path_and_url(path.into(), url.into(), Mode::ReadOnly, GitIndexOptions::default())
     }
 
     /// Get the index directory.
@@ -229,7 +251,12 @@ impl GitIndex {
         Ok(changes::Changes::new(self)?)
     }
 
-    fn from_path_and_url(path: PathBuf, url: String, mode: Mode) -> Result<Option<Self>, Error> {
+    fn from_path_and_url(
+        path: PathBuf,
+        url: String,
+        mode: Mode,
+        options: GitIndexOptions,
+    ) -> Result<Option<Self>, Error> {
         let open_with_complete_config = gix::open::Options::default().permissions(gix::open::Permissions {
             config: gix::open::permissions::Config {
                 // Be sure to get all configuration, some of which is only known by the git binary.
@@ -259,7 +286,7 @@ impl GitIndex {
             Mode::CloneUrlToPathIfRepoMissing => Some(match repo {
                 Some(repo) => repo,
                 None => match gix::open_opts(&path, open_with_complete_config).ok() {
-                    None => clone_url(&url, &path)?,
+                    None => clone_url(&url, &path, &options)?,
                     Some(repo) => repo,
                 },
             }),
@@ -272,6 +299,7 @@ impl GitIndex {
                 Ok(Some(Self {
                     path,
                     url,
+                    options,
                     repo,
                     head_commit,
                 }))
@@ -311,9 +339,10 @@ impl GitIndex {
             .find_remote("origin")
             .ok()
             .unwrap_or_else(|| self.repo.remote_at(self.url.as_str()).expect("own URL is always valid"));
-        fetch_remote(
+        fetch_remote_with_shallow(
             &mut remote,
             &["+HEAD:refs/remotes/origin/HEAD", "+master:refs/remotes/origin/master"],
+            self.options.gix_shallow(),
         )?;
 
         let head_commit = Self::find_repo_head(&self.repo, &self.path)?;
@@ -533,19 +562,29 @@ fn with_delta_cache(mut repo: gix::Repository) -> gix::Repository {
 }
 
 pub(super) fn fetch_remote(remote: &mut gix::Remote<'_>, refspecs: &[&str]) -> Result<(), GixError> {
+    fetch_remote_with_shallow(remote, refspecs, gix::remote::fetch::Shallow::default())
+}
+
+fn fetch_remote_with_shallow(
+    remote: &mut gix::Remote<'_>,
+    refspecs: &[&str],
+    shallow: gix::remote::fetch::Shallow,
+) -> Result<(), GixError> {
     remote.replace_refspecs(refspecs, gix::remote::Direction::Fetch)?;
 
     remote
         .connect(gix::remote::Direction::Fetch)?
         .prepare_fetch(gix::progress::Discard, Default::default())?
+        .with_shallow(shallow)
         .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)?;
     Ok(())
 }
 
-fn clone_url(url: &str, destination: &Path) -> Result<gix::Repository, GixError> {
+fn clone_url(url: &str, destination: &Path, options: &GitIndexOptions) -> Result<gix::Repository, GixError> {
     // Clones and fetches already know they need `bin_config` to work, so nothing to do here.
     let (repo, _outcome) = gix::prepare_clone_bare(url, destination)?
         .with_remote_name("origin")?
+        .with_shallow(options.gix_shallow())
         .configure_remote(|remote| {
             Ok(remote.with_refspecs(
                 ["+HEAD:refs/remotes/origin/HEAD", "+master:refs/remotes/origin/master"],
@@ -554,6 +593,14 @@ fn clone_url(url: &str, destination: &Path) -> Result<gix::Repository, GixError>
         })
         .fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)?;
     Ok(repo)
+}
+
+impl GitIndexOptions {
+    fn gix_shallow(&self) -> gix::remote::fetch::Shallow {
+        self.shallow_depth
+            .map(gix::remote::fetch::Shallow::DepthAtRemote)
+            .unwrap_or_default()
+    }
 }
 
 /// Iterator over all crates in the index, but returns opaque objects that can be parsed separately.
